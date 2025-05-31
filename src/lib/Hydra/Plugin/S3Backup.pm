@@ -54,7 +54,11 @@ sub buildFinished {
 
     return unless @matching_configs;
     unless (defined $client) {
-        $client = Net::Amazon::S3::Client->new( s3 => Net::Amazon::S3->new( retry => 1 ) );
+        my $endpoint = $ENV{HYDRA_S3_ENDPOINT} || "s3.amazonaws.com";
+        $client = Net::Amazon::S3::Client->new( s3 => Net::Amazon::S3->new( 
+          retry => 1,
+          endpoint => $endpoint,
+        ) );
     }
 
     # !!! Maybe should do per-bucket locking?
