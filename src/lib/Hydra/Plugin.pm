@@ -21,7 +21,24 @@ sub instantiate {
     my ($class, %args) = @_;
     my $plugins = [];
     $args{plugins} = $plugins;
-    push @$plugins, grep { $_->isEnabled } $class->plugins(%args);
+    
+    print STDERR "Plugin: Starting plugin instantiation\n";
+    
+    my @all_plugins = $class->plugins(%args);
+    print STDERR "Plugin: Found " . scalar(@all_plugins) . " total plugins\n";
+    
+    my @enabled_plugins = grep { $_->isEnabled } @all_plugins;
+    print STDERR "Plugin: " . scalar(@enabled_plugins) . " plugins are enabled\n";
+    
+    foreach my $plugin (@enabled_plugins) {
+        my $plugin_name = ref($plugin);
+        print STDERR "Plugin: Loaded plugin: $plugin_name\n";
+    }
+    
+    push @$plugins, @enabled_plugins;
+    
+    print STDERR "Plugin: Plugin instantiation completed with " . scalar(@$plugins) . " active plugins\n";
+    
     return @$plugins;
 }
 

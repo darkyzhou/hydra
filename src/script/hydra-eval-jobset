@@ -33,7 +33,9 @@ my $notifyAdded = $db->storage->dbh->prepare("notify builds_added, ?");
 
 my $config = getHydraConfig();
 
+print STDERR "hydra-eval-jobset: Starting plugin instantiation\n";
 my $plugins = [Hydra::Plugin->instantiate(db => $db, config => $config)];
+print STDERR "hydra-eval-jobset: Plugin instantiation completed\n";
 
 my $dryRun = defined $ENV{'HYDRA_DRY_RUN'};
 
