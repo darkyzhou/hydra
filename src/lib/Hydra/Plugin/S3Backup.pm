@@ -18,7 +18,9 @@ use Hydra::Helper::Nix;
 
 sub isEnabled {
     my ($self) = @_;
-    return defined $self->{config}->{s3backup};
+    my $enabled = defined $self->{config}->{s3backup};
+    print STDERR "++++++++++++++++++++ S3Backup plugin " . ($enabled ? "enabled" : "disabled") . "\n";
+    return $enabled;
 }
 
 my $client;
@@ -43,6 +45,9 @@ sub buildFinished {
 
     my $jobName = showJobName $build;
     my $job = $build->job;
+    my $build_id = $build->id;
+
+    print STDERR "S3Backup: Processing build $build_id for job '$jobName'\n";
 
     my $cfg = $self->{config}->{s3backup};
     my @config = defined $cfg ? ref $cfg eq "ARRAY" ? @$cfg : ($cfg) : ();
@@ -52,17 +57,32 @@ sub buildFinished {
         push @matching_configs, $bucket_config if $jobName =~ /^$bucket_config->{jobs}$/;
     }
 
-    return unless @matching_configs;
+    unless (@matching_configs) {
+        print STDERR "S3Backup: No matching configurations for job '$jobName'\n";
+        return;
+    }
+
+    print STDERR "S3Backup: Found " . scalar(@matching_configs) . " matching bucket configurations\n";
+
     unless (defined $client) {
         my $endpoint = $ENV{HYDRA_S3_ENDPOINT} || "s3.amazonaws.com";
-        $client = Net::Amazon::S3::Client->new( s3 => Net::Amazon::S3->new( 
-          retry => 1,
-          endpoint => $endpoint,
-        ) );
+        print STDERR "S3Backup: Initializing S3 client with endpoint: $endpoint\n";
+        eval {
+            $client = Net::Amazon::S3::Client->new( s3 => Net::Amazon::S3->new( 
+              retry => 1,
+              endpoint => $endpoint,
+            ) );
+        };
+        if ($@) {
+            print STDERR "S3Backup: Failed to initialize S3 client: $@\n";
+            return;
+        }
+        print STDERR "S3Backup: S3 client initialized successfully\n";
     }
 
     # !!! Maybe should do per-bucket locking?
     my $lockhandle = IO::File->new;
+    print STDERR "S3Backup: Acquiring lock file: $lockfile\n";
     open($lockhandle, "+>", $lockfile) or die "Opening $lockfile: $!";
     flock($lockhandle, Fcntl::LOCK_SH) or die "Read-locking $lockfile: $!";
 
@@ -70,6 +90,7 @@ sub buildFinished {
     foreach my $output ($build->buildoutputs) {
         push @needed_paths, $output->path;
     }
+    print STDERR "S3Backup: Found " . scalar(@needed_paths) . " output paths to process\n";
 
     my %narinfos = ();
     my %compression_types = ();
@@ -83,18 +104,23 @@ sub buildFinished {
             $compression_types{$compression_type} = [ $bucket_config ];
             $narinfos{$compression_type} = [];
         }
+        print STDERR "S3Backup: Bucket '" . $bucket_config->{name} . "' will use compression: $compression_type\n";
     }
 
-    my $build_id = $build->id;
     my $tempdir = File::Temp->newdir("s3-backup-nars-$build_id" . "XXXXX", TMPDIR => 1);
+    print STDERR "S3Backup: Created temporary directory: " . $tempdir->dirname . "\n";
 
     my %seen = ();
+    my $processed_paths = 0;
     # Upload nars and build narinfos
     while (@needed_paths) {
         my $path = shift @needed_paths;
         next if exists $seen{$path};
         $seen{$path} = undef;
         my $hash = substr basename($path), 0, 32;
+        
+        print STDERR "S3Backup: Processing path: $path (hash: $hash)\n";
+        
         my ($deriver, $narHash, $time, $narSize, $refs) = queryPathInfo($path, 0);
         my $system;
         if (defined $deriver and $MACHINE_LOCAL_STORE->isValidPath($deriver)) {
@@ -103,6 +129,7 @@ sub buildFinished {
         foreach my $reference (@{$refs}) {
             push @needed_paths, $reference;
         }
+        
         foreach my $compression_type (keys %compression_types) {
             my $configs = $compression_types{$compression_type};
             my @incomplete_buckets = ();
@@ -110,17 +137,28 @@ sub buildFinished {
             foreach my $bucket_config (@{$configs}) {
                 my $bucket = $client->bucket( name => $bucket_config->{name} );
                 my $prefix = exists $bucket_config->{prefix} ? $bucket_config->{prefix} : "";
-                push @incomplete_buckets, $bucket_config
-                  unless $bucket->object( key => $prefix . "$hash.narinfo" )->exists;
+                unless ($bucket->object( key => $prefix . "$hash.narinfo" )->exists) {
+                    push @incomplete_buckets, $bucket_config;
+                    print STDERR "S3Backup: Bucket '" . $bucket_config->{name} . "' missing $hash.narinfo\n";
+                }
             }
             next unless @incomplete_buckets;
+            
+            print STDERR "S3Backup: Creating NAR for $path with $compression_type compression\n";
             my $compressor = $compressors{$compression_type};
-            system("$Nix::Config::binDir/nix-store --dump $path $compressor > $tempdir/nar") == 0 or die;
+            if (system("$Nix::Config::binDir/nix-store --dump $path $compressor > $tempdir/nar") != 0) {
+                print STDERR "S3Backup: Failed to create NAR for $path\n";
+                die;
+            }
+            
             my $digest = Digest::SHA->new(256);
             $digest->addfile("$tempdir/nar");
             my $file_hash = $digest->hexdigest;
             my @stats = stat "$tempdir/nar" or die "Couldn't stat $tempdir/nar";
             my $file_size = $stats[7];
+            
+            print STDERR "S3Backup: NAR created - size: $file_size bytes, sha256: $file_hash\n";
+            
             my $narinfo = "";
             $narinfo .= "StorePath: $path\n";
             $narinfo .= "URL: $hash.nar\n";
@@ -137,6 +175,7 @@ sub buildFinished {
                 }
             }
             push @{$narinfos{$compression_type}}, { hash => $hash, info => $narinfo };
+            
             foreach my $bucket_config (@incomplete_buckets) {
                 my $bucket = $client->bucket( name => $bucket_config->{name} );
                 my $prefix = exists $bucket_config->{prefix} ? $bucket_config->{prefix} : "";
@@ -144,12 +183,23 @@ sub buildFinished {
                     key => $prefix . "$hash.nar",
                     content_type => "application/x-nix-archive"
                 );
-                $nar_object->put_filename("$tempdir/nar");
+                print STDERR "S3Backup: Uploading NAR to bucket '" . $bucket_config->{name} . "': $prefix$hash.nar\n";
+                eval {
+                    $nar_object->put_filename("$tempdir/nar");
+                };
+                if ($@) {
+                    print STDERR "S3Backup: Failed to upload NAR to bucket '" . $bucket_config->{name} . "': $@\n";
+                    die;
+                }
             }
         }
+        $processed_paths++;
     }
 
+    print STDERR "S3Backup: Processed $processed_paths unique paths\n";
+
     # Upload narinfos
+    my $uploaded_narinfos = 0;
     foreach my $compression_type (keys %narinfos) {
         my $infos = $narinfos{$compression_type};
         foreach my $bucket_config (@{$compression_types{$compression_type}}) {
@@ -160,10 +210,22 @@ sub buildFinished {
                     key => $prefix . $info->{hash} . ".narinfo",
                     content_type => "text/x-nix-narinfo"
                 );
-                $narinfo_object->put($info->{info}) unless $narinfo_object->exists;
+                unless ($narinfo_object->exists) {
+                    print STDERR "S3Backup: Uploading narinfo to bucket '" . $bucket_config->{name} . "': $prefix" . $info->{hash} . ".narinfo\n";
+                    eval {
+                        $narinfo_object->put($info->{info});
+                    };
+                    if ($@) {
+                        print STDERR "S3Backup: Failed to upload narinfo to bucket '" . $bucket_config->{name} . "': $@\n";
+                        die;
+                    }
+                    $uploaded_narinfos++;
+                }
             }
         }
     }
+
+    print STDERR "S3Backup: Build $build_id backup completed successfully. Uploaded $uploaded_narinfos narinfos\n";
 }
 
 1;
