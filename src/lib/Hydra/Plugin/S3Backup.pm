@@ -62,8 +62,6 @@ sub buildFinished {
         return;
     }
 
-    print STDERR "S3Backup: Found " . scalar(@matching_configs) . " matching bucket configurations\n";
-
     unless (defined $client) {
         my $vendor;
         my $authorization_context;
@@ -76,7 +74,6 @@ sub buildFinished {
                     aws_access_key_id     => $bucket_config->{access_key_id},
                     aws_secret_access_key => $bucket_config->{access_key_secret},
                 );
-                print STDERR "S3Backup: Initialized authorization context with access key ID: " . $bucket_config->{access_key_id} . "\n";
             }
             
             if (exists $bucket_config->{host}) {
@@ -97,7 +94,6 @@ sub buildFinished {
                 }
                 
                 $vendor = Net::Amazon::S3::Vendor::Generic->new(%vendor_params);
-                print STDERR "S3Backup: Initialized custom S3 vendor for host: " . $bucket_config->{host} . "\n";
             }
         }
         
@@ -106,7 +102,6 @@ sub buildFinished {
             die "S3Backup: access_key_id and access_key_secret are required in bucket configuration";
         }
         
-        print STDERR "S3Backup: Initializing S3 client\n";
         eval {
             my %s3_params = (
                 authorization_context => $authorization_context,
@@ -122,22 +117,18 @@ sub buildFinished {
             );
         };
         if ($@) {
-            print STDERR "S3Backup: Failed to initialize S3 client: $@\n";
             return;
         }
-        print STDERR "S3Backup: S3 client initialized successfully\n";
     }
 
     # !!! Maybe should do per-bucket locking?
     my $lockhandle = IO::File->new;
-    print STDERR "S3Backup: Acquiring lock file: $lockfile\n";
     open($lockhandle, "+>", $lockfile) or die "Opening $lockfile: $!";
     flock($lockhandle, Fcntl::LOCK_SH) or die "Read-locking $lockfile: $!";
 
     my @needed_paths = ();
     foreach my $output ($build->buildoutputs) {
         push @needed_paths, $output->path;
-        print STDERR "S3Backup: Adding path: " . $output->path . "\n";
     }
 
     # Check if drvpath backup is enabled (default: true for backward compatibility)  
@@ -146,7 +137,6 @@ sub buildFinished {
         if (exists $bucket_config->{backup_drvpath}) {
             my $value = $bucket_config->{backup_drvpath};
             $backup_drvpath = ($value eq "1" || lc($value) eq "true" || lc($value) eq "yes") ? 1 : 0;
-            print STDERR "S3Backup: backup_drvpath setting: " . ($backup_drvpath ? "enabled" : "disabled") . "\n";
             last;  # Use the first config's setting
         }
     }
@@ -197,11 +187,9 @@ sub buildFinished {
             $compression_types{$compression_type} = [ $bucket_config ];
             $narinfos{$compression_type} = [];
         }
-        print STDERR "S3Backup: Bucket '" . $bucket_config->{name} . "' will use compression: $compression_type\n";
     }
 
     my $tempdir = File::Temp->newdir("s3-backup-nars-$build_id" . "XXXXX", TMPDIR => 1);
-    print STDERR "S3Backup: Created temporary directory: " . $tempdir->dirname . "\n";
 
     my %seen = ();
     my $processed_paths = 0;
@@ -212,32 +200,21 @@ sub buildFinished {
         $seen{$path} = undef;
         my $hash = substr basename($path), 0, 32;
         
-        print STDERR "S3Backup: Processing path: $path (hash: $hash)\n";
-        
-        print STDERR "S3Backup: Querying path info for: $path\n";
         my ($deriver, $narHash, $time, $narSize, $refs) = $MACHINE_LOCAL_STORE->queryPathInfo($path, 0);
-        
-        print STDERR "S3Backup: Path info - narHash: $narHash, narSize: $narSize, deriver: " . ($deriver // "none") . "\n";
-        print STDERR "S3Backup: Path has " . scalar(@{$refs}) . " references\n";
         
         my $system;
         if (defined $deriver and $MACHINE_LOCAL_STORE->isValidPath($deriver)) {
-            print STDERR "S3Backup: Deriver $deriver is valid, getting derivation info\n";
             eval {
                 my $derivation = $MACHINE_LOCAL_STORE->derivationFromPath($deriver);
                 $system = $derivation->{platform};
-                print STDERR "S3Backup: Derivation platform: " . ($system // "unknown") . "\n";
             };
             if ($@) {
                 print STDERR "S3Backup: Warning - failed to get derivation info for $deriver: $@\n";
             }
-        } else {
-            print STDERR "S3Backup: No valid deriver found for path $path\n";
         }
         
         foreach my $reference (@{$refs}) {
             push @needed_paths, $reference;
-            print STDERR "S3Backup: Adding reference to queue: $reference\n";
         }
         
         foreach my $compression_type (keys %compression_types) {
@@ -249,14 +226,12 @@ sub buildFinished {
                 my $prefix = exists $bucket_config->{prefix} ? $bucket_config->{prefix} : "";
                 unless ($bucket->object( key => $prefix . "$hash.narinfo" )->exists) {
                     push @incomplete_buckets, $bucket_config;
-                    print STDERR "S3Backup: Bucket '" . $bucket_config->{name} . "' missing $hash.narinfo\n";
                 }
             }
             next unless @incomplete_buckets;
             
-            print STDERR "S3Backup: Creating NAR for $path with $compression_type compression\n";
             my $compressor = $compressors{$compression_type};
-            if (system("$Nix::Config::binDir/nix-store --dump $path $compressor > $tempdir/nar") != 0) {
+            if (system("nix-store --dump $path $compressor > $tempdir/nar") != 0) {
                 print STDERR "S3Backup: Failed to create NAR for $path\n";
                 die;
             }
@@ -267,7 +242,6 @@ sub buildFinished {
             my @stats = stat "$tempdir/nar" or die "Couldn't stat $tempdir/nar";
             my $file_size = $stats[7];
             
-            print STDERR "S3Backup: NAR created - size: $file_size bytes, sha256: $file_hash\n";
             
             my $narinfo = "";
             $narinfo .= "StorePath: $path\n";
@@ -305,8 +279,6 @@ sub buildFinished {
         }
         $processed_paths++;
     }
-
-    print STDERR "S3Backup: Processed $processed_paths unique paths\n";
 
     # Upload narinfos
     my $uploaded_narinfos = 0;
