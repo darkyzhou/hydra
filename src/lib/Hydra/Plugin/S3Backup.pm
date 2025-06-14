@@ -140,34 +140,49 @@ sub buildFinished {
         print STDERR "S3Backup: Adding path: " . $output->path . "\n";
     }
 
-    # Safely add drvpath with defensive checks
-    my $drvpath;
-    
-    # Try different methods to get drvpath
-    eval {
-        # Method 1: Try accessing via DBIx::Class method
-        if ($build->can('drvpath')) {
-            $drvpath = $build->drvpath;
+    # Check if drvpath backup is enabled (default: true for backward compatibility)  
+    my $backup_drvpath = 1;  # default to enabled
+    foreach my $bucket_config (@matching_configs) {
+        if (exists $bucket_config->{backup_drvpath}) {
+            my $value = $bucket_config->{backup_drvpath};
+            $backup_drvpath = ($value eq "1" || lc($value) eq "true" || lc($value) eq "yes") ? 1 : 0;
+            print STDERR "S3Backup: backup_drvpath setting: " . ($backup_drvpath ? "enabled" : "disabled") . "\n";
+            last;  # Use the first config's setting
         }
-        # Method 2: Try get_column if available
-        elsif ($build->can('get_column')) {
-            $drvpath = $build->get_column('drvpath');
+    }
+
+    # Safely add drvpath with defensive checks (if enabled)
+    if ($backup_drvpath) {
+        my $drvpath;
+        
+        # Try different methods to get drvpath
+        eval {
+            # Method 1: Try accessing via DBIx::Class method
+            if ($build->can('drvpath')) {
+                $drvpath = $build->drvpath;
+            }
+            # Method 2: Try get_column if available
+            elsif ($build->can('get_column')) {
+                $drvpath = $build->get_column('drvpath');
+            }
+            # Method 3: Try accessing _column_data directly
+            elsif (ref($build) eq 'HASH' && exists $build->{_column_data} 
+                   && ref($build->{_column_data}) eq 'HASH' 
+                   && exists $build->{_column_data}->{drvpath}) {
+                $drvpath = $build->{_column_data}->{drvpath};
+            }
+        };
+        
+        if ($@) {
+            print STDERR "S3Backup: Warning - could not access drvpath: $@\n";
+        } elsif (defined $drvpath && $drvpath ne '') {
+            push @needed_paths, $drvpath;
+            print STDERR "S3Backup: Adding drvpath: $drvpath\n";
+        } else {
+            print STDERR "S3Backup: Warning - drvpath is undefined or empty\n";
         }
-        # Method 3: Try accessing _column_data directly
-        elsif (ref($build) eq 'HASH' && exists $build->{_column_data} 
-               && ref($build->{_column_data}) eq 'HASH' 
-               && exists $build->{_column_data}->{drvpath}) {
-            $drvpath = $build->{_column_data}->{drvpath};
-        }
-    };
-    
-    if ($@) {
-        print STDERR "S3Backup: Warning - could not access drvpath: $@\n";
-    } elsif (defined $drvpath && $drvpath ne '') {
-        push @needed_paths, $drvpath;
-        print STDERR "S3Backup: Adding drvpath: $drvpath\n";
     } else {
-        print STDERR "S3Backup: Warning - drvpath is undefined or empty\n";
+        print STDERR "S3Backup: drvpath backup is disabled\n";
     }
 
     my %narinfos = ();
