@@ -22,6 +22,8 @@ sub isEnabled {
     return defined $self->{config}->{s3backup};
 }
 
+my $nix_store = Nix::Store->new;
+
 my $http_client;
 
 my $lockfile = Hydra::Model::DB::getHydraPath . "/.hydra-s3backup.lock";
@@ -94,20 +96,18 @@ sub buildFinished {
         my %initial_paths_set = map { $_ => 1 } @initial_paths;  # Create set for deduplication
         
         foreach my $initial_path (@initial_paths) {
-            my $cmd = "nix --extra-experimental-features nix-command path-info --derivation '$initial_path' 2>/dev/null";
-            my @drv_paths = `$cmd`;
-            if ($? != 0) {
-                print STDERR "S3Backup: Warning - nix path-info --derivation failed for $initial_path\n";
+            my $drv_path;
+            eval {
+                $drv_path = $nix_store->queryDeriver($initial_path);  # 查询derivation
+            };
+            if ($@) {
+                print STDERR "S3Backup: Warning - queryDeriver failed for $initial_path\n";
                 next;
             }
-            
-            foreach my $drv_path (@drv_paths) {
-                chomp $drv_path;
-                next if $drv_path eq '';
-                if (!exists $initial_paths_set{$drv_path}) {
-                    push @initial_paths, $drv_path;
-                    $initial_paths_set{$drv_path} = 1;
-                }
+            next if $drv_path eq '';
+            if (!exists $initial_paths_set{$drv_path}) {
+                push @initial_paths, $drv_path;
+                $initial_paths_set{$drv_path} = 1;
             }
         }
     }
@@ -115,16 +115,15 @@ sub buildFinished {
     # Step 2: Now initial_paths is ready, collect all dependencies
     my %all_paths = ();
     foreach my $initial_path (@initial_paths) {
-        my $cmd = "nix-store -q -R --include-outputs '$initial_path' 2>/dev/null";
-        my @paths = `$cmd`;
-        
-        if ($? != 0) {
-            print STDERR "S3Backup: Error - nix-store query failed for $initial_path\n";
+        my @paths;
+        eval {
+            @paths = $nix_store->computeFSClosure(0, 1, $initial_path);
+        };
+        if ($@) {
+            print STDERR "S3Backup: Error - computeFSClosure failed for $initial_path\n";
             next;
         }
-        
         foreach my $path (@paths) {
-            chomp $path;
             next if $path eq '';
             $all_paths{$path} = 1;
         }
@@ -177,6 +176,8 @@ sub buildFinished {
         }
         
         next if $should_skip;
+
+        # TODO
         
         if (system("nix --extra-experimental-features nix-command store dump-path $path > $tempdir/nar") != 0) {
             print STDERR "S3Backup: Failed to create NAR for $path\n";
