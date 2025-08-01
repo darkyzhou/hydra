@@ -195,14 +195,18 @@ sub machines :Local Args(0) {
     }
     delete $machines->{'localhost'};
 
-    my $status = $c->model('DB::SystemStatus')->find("queue-runner");
-    if ($status) {
-        my $ms = decode_json($status->status)->{"machines"};
-        foreach my $name (keys %{$ms}) {
-            $name = "" if $name eq "localhost";
-            $machines->{$name} //= {disabled => 1};
-            $machines->{$name}->{nrStepsDone} = $ms->{$name}->{nrStepsDone};
-            $machines->{$name}->{avgStepBuildTime} = $ms->{$name}->{avgStepBuildTime} // 0;
+    # Only merge queue runner stats when not using queue runner endpoint directly
+    # as getMachines() already includes this data when using the endpoint
+    if (not $c->config->{'queue_runner_endpoint'}) {
+        my $status = $c->model('DB::SystemStatus')->find("queue-runner");
+        if ($status) {
+            my $ms = decode_json($status->status)->{"machines"};
+            foreach my $name (keys %{$ms}) {
+                $name = "" if $name eq "localhost";
+                $machines->{$name} //= {disabled => 1};
+                $machines->{$name}->{nrStepsDone} = $ms->{$name}->{nrStepsDone};
+                $machines->{$name}->{avgStepBuildTime} = $ms->{$name}->{avgStepBuildTime} // 0;
+            }
         }
     }
 
