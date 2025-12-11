@@ -18,7 +18,7 @@ my @config = defined $cfg ? ref $cfg eq "ARRAY" ? @$cfg : ($cfg) : ();
 
 exit 0 unless @config;
 
-my $lockfile = Hydra::Model::DB::getHydraPath . "/.hydra-s3backup.lock";
+my $lockfile = "/tmp/.hydra-s3backup.lock";
 my $lockhandle = IO::File->new;
 open($lockhandle, ">", $lockfile) or die "Opening $lockfile: $!";
 flock($lockhandle, Fcntl::LOCK_EX) or die "Write-locking $lockfile: $!";
